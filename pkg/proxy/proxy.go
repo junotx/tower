@@ -80,7 +80,7 @@ type Proxy struct {
 	caKey  []byte
 
 	clusterClient runtimeclient.Client
-	k8sClientSet  *kubernetes.Clientset
+	k8sClientSet  kubernetes.Interface
 }
 
 func (s *Proxy) SetupWithManager(mgr ctrl.Manager) error {
@@ -162,7 +162,7 @@ func (s *Proxy) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, e
 	return ctrl.Result{}, s.addSVC(cluster)
 }
 
-func NewServer(options *Options, client runtimeclient.Client, k8sClientSet *kubernetes.Clientset) (*Proxy, error) {
+func NewServer(options *Options, client runtimeclient.Client, k8sClientSet kubernetes.Interface) (*Proxy, error) {
 	s := &Proxy{
 		httpServer:    NewHTTPServer(),
 		agents:        utils.NewAgents(),
@@ -487,15 +487,22 @@ func (s *Proxy) addCluster(cluster *v1alpha1.Cluster) error {
 		return nil
 	}
 
-	// allocate ports for kubernetes and kubesphere endpoint
-	port, err := s.allocatePort()
-	if err != nil {
-		klog.Errorf("failed to allocate port for cluster %s, err: %+v", cluster.Name, err)
-		return err
-	}
+	// allocate ports for kubernetes and kubesphere endpoint.
+	// Reuse the already allocated port if there is one: the Cluster CRD declares no
+	// status subresource, so an external full-object update (e.g. editing a label via
+	// the console) wipes status.conditions (see kubesphere/project#7417). Re-allocating
+	// a port here would repoint the mc-<cluster> Service to a port that nothing listens
+	// on and the cluster would never become ready.
+	if cluster.Spec.Connection.KubernetesAPIServerPort == 0 {
+		port, err := s.allocatePort()
+		if err != nil {
+			klog.Errorf("failed to allocate port for cluster %s, err: %+v", cluster.Name, err)
+			return err
+		}
 
-	cluster.Spec.Connection.KubernetesAPIServerPort = port
-	cluster.Spec.Connection.KubeSphereAPIServerPort = port + 10000
+		cluster.Spec.Connection.KubernetesAPIServerPort = port
+		cluster.Spec.Connection.KubeSphereAPIServerPort = port + 10000
+	}
 
 	if len(cluster.Spec.Connection.Token) == 0 {
 		cluster.Spec.Connection.Token = s.generateToken()
@@ -711,24 +718,26 @@ func (s *Proxy) allocatePort() (uint16, error) {
 
 	const maximumRetries = 10
 	for i := 0; i < maximumRetries; i++ {
-		collision := false
 		port := uint16(portRangeMin + mrand.Intn(portRangeMax-portRangeMin+1))
-
-		for _, item := range clusters.Items {
-			if item.Spec.Connection.Type == v1alpha1.ConnectionTypeProxy &&
-				item.Spec.Connection.KubernetesAPIServerPort != 0 &&
-				item.Spec.Connection.KubeSphereAPIServerPort == port {
-				collision = true
-				break
-			}
-		}
-
-		if !collision {
+		if !portInUse(clusters, port) {
 			return port, nil
 		}
 	}
 
 	return 0, fmt.Errorf("unable to allocate port after %d retries", maximumRetries)
+}
+
+// portInUse reports whether the given kubernetes api server port has already been
+// allocated to a proxy cluster.
+func portInUse(clusters *v1alpha1.ClusterList, port uint16) bool {
+	for _, item := range clusters.Items {
+		if item.Spec.Connection.Type == v1alpha1.ConnectionTypeProxy &&
+			item.Spec.Connection.KubernetesAPIServerPort != 0 &&
+			item.Spec.Connection.KubernetesAPIServerPort == port {
+			return true
+		}
+	}
+	return false
 }
 
 // generateToken returns a random 32-byte string as token
