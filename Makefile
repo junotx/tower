@@ -48,7 +48,7 @@ docker-build: test
 	docker build . -t ${IMG}
 
 docker-build-multiarch: test
-	docker buildx build --platform linux/amd64,linux/arm64 . -t ${IMG} --push
+	docker buildx build --platform linux/amd64 . -t ${IMG} --push
 
 # Push the docker image
 docker-push:

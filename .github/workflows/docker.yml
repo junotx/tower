@@ -36,4 +36,4 @@ jobs:
       - name: Build and push docker images
         if: github.event_name == 'push'
         run: |
-          REPO=kubesphere TAG="${GITHUB_REF#refs/*/}" make docker-build-multiarch
+          REPO=${{ secrets.DOCKER_USERNAME }} TAG="${GITHUB_REF#refs/*/}" make docker-build-multiarch
